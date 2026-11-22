@@ -1,0 +1,8 @@
+---
+- name: Check uptime for app-server
+  hosts: app-server
+  gather_facts: false
+  tasks:
+    - name: Check uptime
+      ansible.builtin.command: uptime
+      changed_when: false
