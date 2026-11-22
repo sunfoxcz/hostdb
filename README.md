@@ -12,6 +12,26 @@ The examples use fictional hostnames and documentation IP addresses.
 
 ## Installation on Ubuntu
 
+### Install a release
+
+Download the archive for Linux x86-64 (`amd64`) or ARM64 (`arm64`) and `SHA256SUMS`. If you have GitHub CLI, you can download both files from the terminal. [GitHub Releases](https://github.com/sunfoxcz/hostdb/releases)
+
+```sh
+version=v1.0.0
+arch=amd64
+archive="hostdb-$version-linux-$arch.tar.gz"
+gh release download "$version" --repo sunfoxcz/hostdb --pattern "$archive" --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf "$archive" hostdb
+install -Dm755 hostdb "$HOME/.local/bin/hostdb"
+export PATH="$HOME/.local/bin:$PATH"
+hostdb init
+```
+
+Use `gh attestation verify "$archive" --repo sunfoxcz/hostdb` to verify the archive's build provenance on GitHub. [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+
+### Build from source
+
 Build with Go 1.25 or later. If your Ubuntu repositories offer an older version, install Go from the official distribution. Install the OpenSSH client and Ansible separately according to the integrations you use. [Go installation guide](https://go.dev/doc/install)
 
 ```sh
@@ -287,3 +307,16 @@ make bench
 The integration test runs Ansible to verify the group graph, inheritance, and loading of `group_vars` and `host_vars`. The `ansible.builtin.ping` subtest requires `sshd`, `ssh-keygen`, and an available loopback interface. It starts a temporary `sshd` with test keys. On Ubuntu, the `openssh-server` package provides the server for this test. Tests skip with an explanation when required tools are missing.
 
 `BenchmarkSQL` measures indexed host and group lookups on an open database. `BenchmarkInventory` measures snapshot reads and JSON encoding for 100, 1,000, and 10,000 hosts. `BenchmarkCLI` measures the entire process, including binary startup, database open, queries, and output. Inventory reads names and relationships in a few bulk queries.
+
+## Creating a release
+
+Create an annotated `vMAJOR.MINOR.PATCH` tag on a tested commit on `master`. Write the release notes in the tag message and push the tag to GitHub.
+
+```sh
+git switch master
+git pull --ff-only
+git tag -a v1.0.1 -m 'Describe the changes in this release.'
+git push origin v1.0.1
+```
+
+GitHub Actions tests and builds static Linux binaries on native amd64 and arm64 runners. After both jobs pass, it publishes the archives, their SHA-256 checksums, and build attestations. The release body comes from the annotated tag.

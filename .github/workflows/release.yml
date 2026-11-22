@@ -1,0 +1,142 @@
+name: Build and release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  build:
+    name: Test and build (linux/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      CGO_ENABLED: '0'
+      GOFLAGS: -mod=readonly
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: go.sum
+
+      - name: Install integration test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ansible-core openssh-server zsh
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l cmd internal tests)
+          if [[ -n "$unformatted" ]]; then
+            printf 'Run gofmt on these files:\n%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Test and build
+        run: |
+          make vet
+          make test
+          make build
+
+      - name: Package the release archive
+        if: github.ref_type == 'tag'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Invalid release tag: %s\n' "$GITHUB_REF_NAME"
+            exit 1
+          fi
+          dist="$RUNNER_TEMP/hostdb-dist"
+          stage=$(mktemp -d)
+          mkdir -p "$dist"
+          install -m 0755 bin/hostdb "$stage/hostdb"
+          install -m 0644 README.md "$stage/README.md"
+          db="$RUNNER_TEMP/hostdb-smoke.db"
+          "$stage/hostdb" --db "$db" init
+          "$stage/hostdb" --db "$db" validate
+          commit_time=$(git show -s --format=%ct HEAD)
+          tar --mtime="@$commit_time" --owner=0 --group=0 --numeric-owner -C "$stage" -cf - hostdb README.md \
+            | gzip -n > "$dist/hostdb-$GITHUB_REF_NAME-linux-$ARCH.tar.gz"
+
+      - name: Upload the release archive
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hostdb-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/hostdb-dist/hostdb-${{ github.ref_name }}-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: hostdb-linux-*
+          path: ${{ runner.temp }}/hostdb-dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: ${{ runner.temp }}/hostdb-dist
+        run: |
+          sha256sum "hostdb-$GITHUB_REF_NAME-linux-amd64.tar.gz" \
+            "hostdb-$GITHUB_REF_NAME-linux-arm64.tar.gz" > SHA256SUMS
+
+      - name: Attest the release archives
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/hostdb-dist/hostdb-*.tar.gz
+
+      - name: Publish GitHub release
+        working-directory: ${{ runner.temp }}/hostdb-dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq .object.sha)
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha")
+          if [[ "$(jq -r .object.sha <<< "$tag")" != "$GITHUB_SHA" ]]; then
+            printf 'Release tag no longer points to the commit that was built.\n'
+            exit 1
+          fi
+          notes="$RUNNER_TEMP/hostdb-release-notes.md"
+          jq -r .message <<< "$tag" > "$notes"
+          gh release create "$GITHUB_REF_NAME" \
+            "hostdb-$GITHUB_REF_NAME-linux-amd64.tar.gz" \
+            "hostdb-$GITHUB_REF_NAME-linux-arm64.tar.gz" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "hostdb $GITHUB_REF_NAME" --notes-file "$notes"
