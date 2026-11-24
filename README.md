@@ -153,7 +153,7 @@ hostdb ssh generate
 hostdb ssh sync
 ```
 
-Add the following top-level line to `~/.ssh/config` before general rules such as `Host *` and before hand-written blocks for the same names. OpenSSH uses the first value it finds for most directives. After checking the effective settings, you can consolidate any duplicate blocks. [OpenSSH ssh_config(5)](https://man.openbsd.org/ssh_config)
+Add the following line near the top of `~/.ssh/config`, before the first `Host` or `Match` block. An `Include` inside a block applies only when that block matches, regardless of indentation. OpenSSH uses the first value it finds for most directives, so settings in an earlier `Host *` block can take precedence over the generated settings. After checking the effective settings, you can consolidate any duplicate blocks. [OpenSSH ssh_config(5)](https://man.openbsd.org/ssh_config)
 
 ```sshconfig
 Include ~/.ssh/config.d/hostdb.generated
@@ -287,7 +287,7 @@ The backup includes the saved automatic sync path. If you run the restored datab
 | Symptom | What to check |
 |---|---|
 | The database is missing or has an older schema | Check `HOSTDB_DB` or `--db` and run `hostdb init`. The database should have permissions `0600` and reside in a private directory. |
-| `ssh -G` reports a different user, address, or port | Check the `Include` and the order of hand-written blocks, then run `hostdb doctor`. |
+| `ssh -G` reports a different user, address, or port | Check the `Include` placement and block order described in [OpenSSH](#openssh), then run `hostdb doctor`. |
 | OpenSSH rejects an algorithm or directive | `hostdb doctor` reports the host name and the OpenSSH error. Availability depends on the installed client and its cryptographic libraries. |
 | Ansible falls back to implicit localhost | Verify that the wrapper is executable, `hostdb` is on `PATH`, and `ansible-inventory -i ./inventory-hostdb --graph` uses the intended database. |
 | Ansible warns about a host and group with the same name | Run `hostdb init` to upgrade the database, then run `hostdb validate` to find existing collisions. Use `hostdb host rename OLD NEW` to resolve a canonical name collision and update the matching `host_vars` and playbook references. Use `hostdb host alias remove HOST ALIAS` to resolve an alias collision. |
