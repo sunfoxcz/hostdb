@@ -305,6 +305,46 @@ func TestCLIHostListGroup(t *testing.T) {
 	assertContains(t, runCLI("__completeNoDesc", "host", "list", "--group", "un"), "ungrouped")
 }
 
+func TestGroupNameConflicts(t *testing.T) {
+	dir, _, cli := fixture(t)
+	runCLI := func(args ...string) string { return mustRun(t, dir, cli, args...) }
+	runCLI("init")
+	runCLI("host", "add", "db-node", "--disabled", "--ssh-alias", "db-ssh", "--hostname", "db_servers")
+	runCLI("group", "add", "db_servers")
+	ini := filepath.Join(dir, "inventory.ini")
+	ssh := filepath.Join(dir, "config")
+	writeFile(t, ini, "[new_group]\ndb_servers ansible_host=db.example.com\n", 0600)
+	writeFile(t, ssh, "Host new-node db_servers\n HostName db.example.com\n", 0600)
+
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"host", "add", "db_servers"}, "host name already used as group name"},
+		{[]string{"host", "rename", "db-node", "db_servers"}, "host name already used as group name"},
+		{[]string{"host", "alias", "add", "db-node", "db_servers"}, "SSH alias already used as group name"},
+		{[]string{"host", "add", "new-node", "--ssh-alias", "db_servers"}, "SSH alias already used as group name"},
+		{[]string{"group", "add", "db-node"}, "group name already used as canonical host name"},
+		{[]string{"group", "add", "db-ssh"}, "group name already used as SSH alias"},
+		{[]string{"import", "ansible-ini", ini}, "host name already used as group name"},
+		{[]string{"import", "ssh-config", ssh}, "SSH alias already used as group name"},
+		{[]string{"import", "ssh-config", ssh, "--dry-run"}, "SSH alias already used as group name"},
+	} {
+		out, stderr, err := run(t, dir, cli, tc.args...)
+		if err == nil || out != "" || !strings.Contains(stderr, tc.want) {
+			t.Errorf("%v: expected %q on stderr, got stdout %q, stderr %q, error %v", tc.args, tc.want, out, stderr, err)
+		}
+	}
+	if got := runCLI("host", "list", "--format", "names"); got != "db-node\n" {
+		t.Errorf("unexpected hosts after rejected commands: %q", got)
+	}
+	if got := runCLI("group", "list", "--format", "names"); got != "db_servers\n" {
+		t.Errorf("unexpected groups after rejected commands: %q", got)
+	}
+	assertContains(t, runCLI("host", "show", "db-node"), "SSH aliases: db-ssh\n")
+	runCLI("validate")
+}
+
 func TestImportTransactionAndMapping(t *testing.T) {
 	dir, db, cli := fixture(t)
 	runCLI := func(args ...string) string { return mustRun(t, dir, cli, args...) }

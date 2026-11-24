@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -143,11 +145,25 @@ func TestGroupDAG(t *testing.T) {
 }
 
 func TestMigrationAndBackup(t *testing.T) {
-	s, path, ctx := testStore(t)
-	first, err := s.CreateHost(ctx, Host{Name: "before", Hostname: "before", Port: 22, Enabled: true})
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	check(t, os.WriteFile(path, nil, 0600))
+	db, err := sql.Open("sqlite", path)
 	check(t, err)
-	_, err = s.db.ExecContext(ctx, "DROP INDEX hosts_address; DROP TABLE settings; PRAGMA user_version=1")
+	t.Cleanup(func() { db.Close() })
+	migration, err := migrations.ReadFile("migrations/001_inventory.sql")
 	check(t, err)
+	_, err = db.ExecContext(ctx, string(migration))
+	check(t, err)
+	_, err = db.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id=%d; PRAGMA user_version=1", applicationID))
+	check(t, err)
+	legacy := Queries{db}
+	first, err := legacy.CreateHost(ctx, Host{Name: "before", Hostname: "before", Port: 22, Enabled: true})
+	check(t, err)
+	check(t, legacy.Alias(ctx, first, "before-alias", true))
+	check(t, legacy.AddGroup(ctx, "before", ""))
+	check(t, legacy.AddGroup(ctx, "before-alias", ""))
+	check(t, db.Close())
 	if reader, err := Open(ctx, path, ReadOnly); err == nil {
 		reader.Close()
 		t.Fatal("read-only opening accepted an old schema")
@@ -160,6 +176,13 @@ func TestMigrationAndBackup(t *testing.T) {
 	if h.ID != first {
 		t.Fatalf("migration changed the host: %+v", h)
 	}
+	validationErr := migrated.Validate(ctx)
+	mustFail(t, validationErr, `group "before" conflicts with a canonical host name`)
+	mustFail(t, validationErr, `group "before-alias" conflicts with an SSH alias of host "before"`)
+	check(t, migrated.Alias(ctx, first, "before-alias", false))
+	mustFail(t, migrated.SetHost(ctx, "before", "name", "before-alias"), "used as group name")
+	check(t, migrated.SetHost(ctx, "before", "name", "renamed"))
+	check(t, migrated.Validate(ctx))
 	_, err = migrated.CreateHost(ctx, Host{Name: "in-wal", Hostname: "in-wal", Port: 22, Enabled: true})
 	check(t, err)
 	wal, err := os.Stat(path + "-wal")
@@ -184,7 +207,7 @@ func TestMigrationAndBackup(t *testing.T) {
 	_, err = copy.Host(ctx, "in-wal")
 	check(t, err)
 	check(t, copy.Validate(ctx))
-	mustFail(t, copy.SetHost(ctx, "before", "port", "23"), "readonly")
+	mustFail(t, copy.SetHost(ctx, "renamed", "port", "23"), "readonly")
 }
 
 func TestDBPath(t *testing.T) {

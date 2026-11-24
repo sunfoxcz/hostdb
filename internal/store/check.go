@@ -67,6 +67,13 @@ func (q Queries) Validate(ctx context.Context) error {
 		if err := errors.Join(GroupName(g.Name), Description(g.Description)); err != nil {
 			issues = append(issues, fmt.Errorf("group %q: %w", g.Name, err))
 		}
+		if host, exists := names[g.Name]; exists {
+			if host == g.Name {
+				issues = append(issues, fmt.Errorf("group %q conflicts with a canonical host name", g.Name))
+			} else {
+				issues = append(issues, fmt.Errorf("group %q conflicts with an SSH alias of host %q", g.Name, host))
+			}
+		}
 	}
 	edges, err := q.Children(ctx)
 	if err != nil {

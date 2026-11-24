@@ -144,7 +144,7 @@ A group can have multiple parents, and a host can be a direct member of multiple
 
 `host list --group NAME` includes direct members and members of descendant groups. Each host is listed once, including disabled hosts. `--group all` lists every host, and `--group ungrouped` lists hosts with no group memberships. The filter works with table, JSON, and name output.
 
-Group names can contain letters, digits, underscores, dots, and hyphens. Names that match `[A-Za-z_][A-Za-z0-9_]*` also work with Ansible configurations that rewrite invalid identifiers. Inventory creates `all` and `ungrouped` automatically and reserves `_meta` for metadata. Use distinct host and group names to keep Ansible target patterns unambiguous.
+Group names can contain letters, digits, underscores, dots, and hyphens. Names that match `[A-Za-z_][A-Za-z0-9_]*` also work with Ansible configurations that rewrite invalid identifiers. Inventory creates `all` and `ungrouped` automatically and reserves `_meta` for metadata. A stored group name must differ from every canonical host name and SSH alias, including those of disabled hosts. This rule also applies to imports.
 
 ## OpenSSH
 
@@ -290,10 +290,11 @@ The backup includes the saved automatic sync path. If you run the restored datab
 | `ssh -G` reports a different user, address, or port | Check the `Include` and the order of hand-written blocks, then run `hostdb doctor`. |
 | OpenSSH rejects an algorithm or directive | `hostdb doctor` reports the host name and the OpenSSH error. Availability depends on the installed client and its cryptographic libraries. |
 | Ansible falls back to implicit localhost | Verify that the wrapper is executable, `hostdb` is on `PATH`, and `ansible-inventory -i ./inventory-hostdb --graph` uses the intended database. |
+| Ansible warns about a host and group with the same name | Run `hostdb init` to upgrade the database, then run `hostdb validate` to find existing collisions. Use `hostdb host rename OLD NEW` to resolve a canonical name collision and update the matching `host_vars` and playbook references. Use `hostdb host alias remove HOST ALIAS` to resolve an alias collision. |
 | Inventory variables are missing | Check the variable files alongside the inventory source, verify that names match exactly, and inspect `ansible-inventory --host NAME`. |
 | Ansible targets the wrong host | Check `ansible-inventory --host NAME` and the connection plugin settings. `ansible NAME -m ping -vvvv` opens a connection and prints the details. |
 
-`hostdb validate` checks SQLite integrity, foreign keys, record formats, and group cycles. `hostdb doctor` checks tool availability, file permissions, whether the generated file is current, the `Include` directive, and overrides in user configuration. It runs `ssh -G` on a safe copy of the user configuration without opening a connection. If it encounters a `Match` block or an unsupported `Include` path expansion, it reports the limitation and checks the generated blocks individually. The check covers user-level OpenSSH configuration only.
+`hostdb validate` checks SQLite integrity, foreign keys, record formats, name collisions, and group cycles. `hostdb doctor` checks tool availability, file permissions, whether the generated file is current, the `Include` directive, and overrides in user configuration. It runs `ssh -G` on a safe copy of the user configuration without opening a connection. If it encounters a `Match` block or an unsupported `Include` path expansion, it reports the limitation and checks the generated blocks individually. The check covers user-level OpenSSH configuration only.
 
 ## Tests and performance
 

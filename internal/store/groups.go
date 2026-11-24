@@ -62,7 +62,10 @@ func (q Queries) AddGroup(ctx context.Context, name, description string) error {
 		return err
 	}
 	_, err := q.db.ExecContext(ctx, "INSERT INTO groups(name,description) VALUES (?,?)", name, description)
-	return err
+	if err != nil {
+		return fmt.Errorf("add group %q: %w", name, err)
+	}
+	return nil
 }
 
 func (q Queries) DescribeGroup(ctx context.Context, name, description string) error {

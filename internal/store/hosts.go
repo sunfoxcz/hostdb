@@ -168,6 +168,9 @@ func (q Queries) SetHost(ctx context.Context, name, field, value string) error {
 		return err
 	}
 	r, err := q.db.ExecContext(ctx, "UPDATE hosts SET "+column+"=?, "+touch+" WHERE name=?", arg, name)
+	if err != nil && field == "name" {
+		return fmt.Errorf("rename host %q to %q: %w", name, value, err)
+	}
 	return changed(r, err, fmt.Sprintf("host %q", name))
 }
 
