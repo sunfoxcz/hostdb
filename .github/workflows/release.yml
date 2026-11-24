@@ -79,7 +79,7 @@ jobs:
           install -m 0644 README.md "$stage/README.md"
           db="$RUNNER_TEMP/hostdb-smoke.db"
           "$stage/hostdb" --db "$db" init
-          "$stage/hostdb" --db "$db" validate
+          "$stage/hostdb" --db "$db" check --database-only
           commit_time=$(git show -s --format=%ct HEAD)
           tar --mtime="@$commit_time" --owner=0 --group=0 --numeric-owner -C "$stage" -cf - hostdb README.md \
             | gzip -n > "$dist/hostdb-$GITHUB_REF_NAME-linux-$ARCH.tar.gz"

@@ -45,17 +45,7 @@ func New() *cobra.Command {
 			return store.Upgrade(cmd.Context(), path)
 		}),
 		a.hostCommands(), a.groupCommands(), a.sshCommands(), inv, a.importCommands(), a.completionCommands(root),
-		command("validate", "Check consistency and data in SQLite", cobra.NoArgs, func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			if err := a.withDB(ctx, store.ReadOnly, func(s *store.Store) error {
-				return s.Transaction(ctx, func(q store.Queries) error { return q.Validate(ctx) })
-			}); err != nil {
-				return err
-			}
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), "Database is valid.")
-			return err
-		}),
-		command("doctor", "Check SQLite, OpenSSH configuration and Ansible availability", cobra.NoArgs, a.doctor),
+		a.checkCommand(),
 		command("backup PATH", "Create a consistent SQLite backup", cobra.ExactArgs(1), func(cmd *cobra.Command, args []string) error {
 			path, err := store.Path(a.dbPath)
 			if err != nil {

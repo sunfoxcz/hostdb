@@ -95,7 +95,7 @@ func TestSyncAtomicAndPrivate(t *testing.T) {
 	}
 }
 
-func TestDoctorDoesNotEvaluateMatch(t *testing.T) {
+func TestCheckDoesNotEvaluateMatch(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config")
 	if err := os.WriteFile(path, []byte("Match exec \"touch "+filepath.Join(dir, "ran")+"\"\n    User wrong\n"), 0600); err != nil {

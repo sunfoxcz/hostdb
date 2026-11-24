@@ -19,38 +19,21 @@ import (
 	"hostdb/internal/store"
 )
 
-func Check(ctx context.Context, out io.Writer, ssh, manual, generated string, hosts []store.Host) error {
+func Check(ctx context.Context, ssh, manual, generated string, hosts []store.Host, report func(check, detail string, err error)) {
 	want, err := Generate(hosts)
 	if err != nil {
-		return err
+		report("Generated config", "", err)
+		return
 	}
-	var issues []error
-	info, err := os.Lstat(generated)
-	switch {
-	case err != nil:
-		issues = append(issues, fmt.Errorf("generated SSH config %q: %w (run hostdb ssh sync)", generated, err))
-	case !info.Mode().IsRegular():
-		issues = append(issues, fmt.Errorf("generated SSH config %q is not a regular file", generated))
-	default:
-		if info.Mode().Perm()&0077 != 0 {
-			issues = append(issues, fmt.Errorf("generated SSH config %q is accessible to other users", generated))
-		}
-		current, err := readConfig(generated)
-		if err != nil {
-			issues = append(issues, err)
-		} else if !bytes.Equal(current, want) {
-			issues = append(issues, fmt.Errorf("generated SSH config %q is stale (run hostdb ssh sync)", generated))
-		} else {
-			fmt.Fprintln(out, "Generated SSH config is current:", generated)
-		}
-	}
+	report("Generated config", "Current at "+generated, checkGeneratedConfig(generated, want))
 	if ssh == "" {
-		return errors.Join(issues...)
+		return
 	}
 
-	dir, err := os.MkdirTemp("", "hostdb-doctor-*")
+	dir, err := os.MkdirTemp("", "hostdb-check-*")
 	if err != nil {
-		return errors.Join(append(issues, err)...)
+		report("OpenSSH evaluation", "", err)
+		return
 	}
 	defer os.RemoveAll(dir)
 	snapshot := configSnapshot{
@@ -59,29 +42,32 @@ func Check(ctx context.Context, out io.Writer, ssh, manual, generated string, ho
 	}
 	userConfig, err := snapshot.copy(manual)
 	if err != nil {
-		issues = append(issues, fmt.Errorf("cannot safely evaluate user SSH config %q: %w", manual, err))
+		report("Include", "", fmt.Errorf("cannot safely evaluate user SSH config %q: %w", manual, err))
 	} else if !snapshot.included {
-		issues = append(issues, fmt.Errorf("no Include for %q found in %q", generated, manual))
+		report("Include", "", fmt.Errorf("no Include for %q found in %q", generated, manual))
 	} else {
-		fmt.Fprintln(out, "Found Include for generated SSH config in:", manual)
+		report("Include", "Found in "+manual, nil)
 	}
 
 	baseline := filepath.Join(dir, "host.conf")
 	checked := 0
 	for _, host := range hosts {
 		if err := ctx.Err(); err != nil {
-			return errors.Join(append(issues, err)...)
+			report("OpenSSH evaluation", "", err)
+			return
 		}
 		config, err := Generate([]store.Host{host})
 		if err != nil {
-			return errors.Join(append(issues, err)...)
+			report("Generated host options", "", err)
+			return
 		}
 		if err := os.WriteFile(baseline, config, 0600); err != nil {
-			return errors.Join(append(issues, err)...)
+			report("OpenSSH evaluation", "", err)
+			return
 		}
 		expected, err := effective(ctx, ssh, baseline, host.Name)
 		if err != nil {
-			issues = append(issues, fmt.Errorf("OpenSSH rejected settings for %q: %w", host.Name, err))
+			report("Generated host options", "", fmt.Errorf("OpenSSH rejected settings for %q: %w", host.Name, err))
 			continue
 		}
 		if userConfig == "" || !snapshot.included {
@@ -91,21 +77,41 @@ func Check(ctx context.Context, out io.Writer, ssh, manual, generated string, ho
 		for _, name := range names {
 			actual, err := effective(ctx, ssh, userConfig, name)
 			if err != nil {
-				issues = append(issues, fmt.Errorf("OpenSSH could not evaluate %q: %w", name, err))
+				report("Effective settings", "", fmt.Errorf("OpenSSH could not evaluate %q: %w", name, err))
 				// Other names may hit different blocks, but a parse error can
 				// otherwise produce thousands of identical diagnostics.
 				userConfig = ""
 				break
 			}
-			if err := compare(host, expected, actual); err != nil {
-				issues = append(issues, fmt.Errorf("SSH name %q resolves with overrides or a missing Include: %w", name, err))
+			if keys := differentOptions(host, expected, actual); len(keys) != 0 {
+				report("Effective settings", "", fmt.Errorf("%q differs from the generated config for %s", name, strings.Join(keys, ", ")))
 			} else {
 				checked++
 			}
 		}
 	}
 	if checked > 0 {
-		fmt.Fprintf(out, "OpenSSH resolved %d canonical names and aliases with the configured settings.\n", checked)
+		report("Matching names", fmt.Sprintf("%d canonical names and aliases match", checked), nil)
+	}
+}
+
+func checkGeneratedConfig(path string, want []byte) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("generated SSH config %q: %w (run hostdb ssh sync)", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("generated SSH config %q is not a regular file", path)
+	}
+	var issues []error
+	if info.Mode().Perm()&0077 != 0 {
+		issues = append(issues, fmt.Errorf("generated SSH config %q is accessible to other users", path))
+	}
+	current, err := readConfig(path)
+	if err != nil {
+		issues = append(issues, err)
+	} else if !bytes.Equal(current, want) {
+		issues = append(issues, fmt.Errorf("generated SSH config %q is stale (run hostdb ssh sync)", path))
 	}
 	return errors.Join(issues...)
 }
@@ -132,7 +138,7 @@ func effective(ctx context.Context, ssh, config, name string) (map[string][]stri
 	return result, nil
 }
 
-func compare(h store.Host, expected, actual map[string][]string) error {
+func differentOptions(h store.Host, expected, actual map[string][]string) []string {
 	keys := []string{"hostname", "port"}
 	if h.User != "" {
 		keys = append(keys, "user")
@@ -163,7 +169,7 @@ func compare(h store.Host, expected, actual map[string][]string) error {
 		}
 	}
 
-	var issues []error
+	var differences []string
 	for _, key := range keys {
 		want, got := expected[key], actual[key]
 		match := slices.Equal(want, got)
@@ -177,11 +183,10 @@ func compare(h store.Host, expected, actual map[string][]string) error {
 			match = len(remaining) == 0
 		}
 		if !match {
-			// Option values can include user-provided arguments. Don't echo them.
-			issues = append(issues, fmt.Errorf("effective %s differs from the generated config", key))
+			differences = append(differences, key)
 		}
 	}
-	return errors.Join(issues...)
+	return differences
 }
 
 // Snapshot the user's Include tree with rewritten paths. Match conditions are

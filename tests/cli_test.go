@@ -168,6 +168,49 @@ func TestCLISchemaLifecycle(t *testing.T) {
 	assertContains(t, runCLI("--db", backup, "host", "list", "--format", "names"), "legacy-node")
 }
 
+func TestCLICheckReport(t *testing.T) {
+	dir, path, cli := fixture(t)
+	t.Setenv("PATH", dir)
+	out, stderr, err := run(t, dir, cli, "check")
+	if err == nil || stderr != "hostdb: check failed\n" {
+		t.Fatalf("check with missing database: stdout %q, stderr %q, error %v", out, stderr, err)
+	}
+	tables := strings.Split(strings.TrimSpace(out), "\n\n")
+	if len(tables) != 3 {
+		t.Fatalf("expected three check tables, got %q", out)
+	}
+	for _, table := range tables {
+		lines := strings.SplitN(table, "\n", 4)
+		if len(lines) != 4 || !strings.HasPrefix(lines[2], "─────") || !strings.HasSuffix(lines[2], "──────  ───────") {
+			t.Fatalf("expected a rule below the table headings, got %q", table)
+		}
+	}
+	assertContains(t, tables[0], "Database\nCHECK", "FAIL", "Run hostdb init")
+	assertContains(t, tables[1], "Tools\nCHECK", "OpenSSH client", "FAIL", "Optional tool is not on PATH")
+	assertContains(t, tables[2], "SSH configuration\nCHECK", "SKIP", "Database settings are unavailable")
+
+	mustRun(t, dir, cli, "init")
+	out = mustRun(t, dir, cli, "check", "--database-only")
+	assertContains(t, out, "Database\nCHECK", "Integrity and data", "OK")
+	if strings.Contains(out, "\n\n") {
+		t.Fatalf("database-only check printed multiple tables: %q", out)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	need(t, err)
+	t.Cleanup(func() { db.Close() })
+	_, err = db.Exec("INSERT INTO groups(name) VALUES ('bad group'), ('other bad group')")
+	need(t, err)
+	need(t, db.Close())
+	out, _, err = run(t, dir, cli, "check")
+	if err == nil {
+		t.Fatalf("check accepted invalid group names: %q", out)
+	}
+	database, rest, _ := strings.Cut(out, "\n\nTools\n")
+	assertContains(t, database, "Integrity and data", "FAIL", `group "bad group"`, `group "other bad group"`)
+	assertContains(t, rest, "SSH configuration\nCHECK", "Generated config", "run hostdb ssh sync")
+}
+
 func TestCLIInventoryAndSSH(t *testing.T) {
 	dir, db, cli := fixture(t)
 	runCLI := func(args ...string) string { return mustRun(t, dir, cli, args...) }
@@ -257,7 +300,7 @@ func TestCLIInventoryAndSSH(t *testing.T) {
 			assertContains(t, mustRun(t, dir, ssh, "-G", "-T", "-F", probe, name),
 				"hostname app-server.example.com\n", "user root\n", "port 22\n", "serveraliveinterval 30\n")
 		}
-		assertContains(t, runCLI("doctor"), "Generated SSH config is current", "OpenSSH resolved 3")
+		assertContains(t, runCLI("check"), "SSH configuration\nCHECK", "Current at "+generated, "3 canonical names and aliases match")
 		_, stderr, err := run(t, dir, cli, "ssh", "option", "set", "app-server", "KexAlgorithms", "+hostdb-test-unavailable")
 		if err == nil {
 			t.Fatal("synchronized a KEX algorithm unavailable to OpenSSH")
@@ -269,18 +312,18 @@ func TestCLIInventoryAndSSH(t *testing.T) {
 			t.Fatal("an OpenSSH parse error replaced the published configuration")
 		}
 		assertContains(t, runCLI("ssh", "generate"), "KexAlgorithms +hostdb-test-unavailable")
-		_, stderr, err = run(t, dir, cli, "doctor")
+		out, _, err := run(t, dir, cli, "check")
 		if err == nil {
-			t.Fatal("doctor missed the unavailable KEX algorithm")
+			t.Fatal("check missed the unavailable KEX algorithm")
 		}
-		assertContains(t, stderr, "OpenSSH rejected settings for", "hostdb-test-unavailable")
+		assertContains(t, out, "OpenSSH rejected settings for", "hostdb-test-unavailable")
 		runCLI("ssh", "option", "remove", "app-server", "KexAlgorithms")
 		writeFile(t, manual, "Host *\n    User override\nInclude config.d/hostdb.generated\n", 0600)
-		_, stderr, err = run(t, dir, cli, "doctor")
+		out, _, err = run(t, dir, cli, "check")
 		if err == nil {
-			t.Fatal("doctor missed a manual config conflict")
+			t.Fatal("check missed a manual config conflict")
 		}
-		assertContains(t, stderr, "effective user differs")
+		assertContains(t, out, `"app-server" differs from the generated config for user`)
 	}
 	writeFile(t, generated, "# manual replacement\n", 0600)
 	_, stderr, err = run(t, dir, cli, "host", "set", "app-server", "port", "2200")
@@ -302,7 +345,7 @@ func TestCLIInventoryAndSSH(t *testing.T) {
 	runCLI("host", "enable", "app-server")
 	runCLI("host", "rename", "app-server", "app-ssh")
 	assertContains(t, runCLI("host", "show", "app-ssh"), "groups: php56, ubuntu24")
-	runCLI("validate")
+	runCLI("check", "--database-only")
 }
 
 func TestCLIHostListGroup(t *testing.T) {
@@ -401,7 +444,7 @@ func TestGroupNameConflicts(t *testing.T) {
 		t.Errorf("unexpected groups after rejected commands: %q", got)
 	}
 	assertContains(t, runCLI("host", "show", "db-node"), "SSH aliases: db-ssh\n")
-	runCLI("validate")
+	runCLI("check", "--database-only")
 }
 
 func TestImportTransactionAndMapping(t *testing.T) {

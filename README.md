@@ -123,7 +123,7 @@ hostdb ssh option remove app-server IdentityFile '"~/.ssh/team keys/id_ed25519"'
 
 Host-specific options include `ProxyJump`, `ProxyCommand`, `ForwardAgent`, `ServerAliveCountMax`, `ConnectTimeout`, `StrictHostKeyChecking`, and `UserKnownHostsFile`. Use `host set` for `HostName`, `User`, and `Port`. Stored options exclude structural directives such as `Host`, `Match`, `Include`, and `IgnoreUnknown`. Store private key paths in hostdb and keep credentials in a secrets manager or Ansible Vault. Use trusted values for directives such as `ProxyCommand`, which OpenSSH can execute when connecting.
 
-Algorithm list additions with `+` apply only to the host blocks that specify them. `hostdb doctor` reports directives or algorithm lists that the installed OpenSSH client rejects and preserves the stored values. Use `ssh -Q kex` and `ssh -Q key` to list available algorithms.
+Algorithm list additions with `+` apply only to the host blocks that specify them. `hostdb check` reports directives or algorithm lists that the installed OpenSSH client rejects and preserves the stored values. Use `ssh -Q kex` and `ssh -Q key` to list available algorithms.
 
 ## Groups and child groups
 
@@ -174,7 +174,7 @@ Include ~/.ssh/config.d/hostdb.generated
 ```sh
 ssh -G app-ssh
 ssh -G app-server
-hostdb doctor
+hostdb check
 ```
 
 Both `ssh -G` commands should report `hostname app-server.example.com`, `user root`, and `port 22`. If OpenSSH is available locally, `hostdb` checks the generated configuration before replacing the previous file. If the check fails, the previous file stays in place. Successful writes are atomic and use permissions `0600`.
@@ -286,7 +286,7 @@ The backup command uses `VACUUM INTO` to take a consistent SQLite snapshot, incl
 install -Dm600 "$HOME/backups/hostdb/hosts-2026-11-22.db" \
     "$HOME/.local/share/hostdb/restored.db"
 export HOSTDB_DB="$HOME/.local/share/hostdb/restored.db"
-hostdb validate
+hostdb check --database-only
 hostdb inventory --list
 hostdb ssh sync
 ```
@@ -299,14 +299,16 @@ The backup includes the saved automatic sync path. If you run the restored datab
 |---|---|
 | The database is missing | Check `HOSTDB_DB` or `--db` and run `hostdb init` to create it. The database should have permissions `0600` and reside in a private directory. |
 | An automatic schema upgrade fails because the database is read-only | Run `hostdb upgrade` with write access to the selected database, then retry the command. |
-| `ssh -G` reports a different user, address, or port | Check the `Include` placement and block order described in [OpenSSH](#openssh), then run `hostdb doctor`. |
-| OpenSSH rejects an algorithm or directive | `hostdb doctor` reports the host name and the OpenSSH error. Availability depends on the installed client and its cryptographic libraries. |
+| `ssh -G` reports a different user, address, or port | Check the `Include` placement and block order described in [OpenSSH](#openssh), then run `hostdb check`. |
+| OpenSSH rejects an algorithm or directive | `hostdb check` reports the host name and the OpenSSH error. Availability depends on the installed client and its cryptographic libraries. |
 | Ansible falls back to implicit localhost | Verify that the wrapper is executable, `hostdb` is on `PATH`, and `ansible-inventory -i ./inventory-hostdb --graph` uses the intended database. |
-| Ansible warns about a host and group with the same name | Run `hostdb validate` to find existing collisions. Use `hostdb host rename OLD NEW` to resolve a canonical name collision and update the matching `host_vars` and playbook references. Use `hostdb host alias remove HOST ALIAS` to resolve an alias collision. |
+| Ansible warns about a host and group with the same name | Run `hostdb check --database-only` to find existing collisions. Use `hostdb host rename OLD NEW` to resolve a canonical name collision and update the matching `host_vars` and playbook references. Use `hostdb host alias remove HOST ALIAS` to resolve an alias collision. |
 | Inventory variables are missing | Check the variable files alongside the inventory source, verify that names match exactly, and inspect `ansible-inventory --host NAME`. |
 | Ansible targets the wrong host | Check `ansible-inventory --host NAME` and the connection plugin settings. `ansible NAME -m ping -vvvv` opens a connection and prints the details. |
 
-`hostdb validate` checks SQLite integrity, foreign keys, record formats, name collisions, and group cycles. `hostdb doctor` checks tool availability, file permissions, whether the generated file is current, the `Include` directive, and overrides in user configuration. It runs `ssh -G` on a safe copy of the user configuration without opening a connection. If it encounters a `Match` block or an unsupported `Include` path expansion, it reports the limitation and checks the generated blocks individually. The check covers user-level OpenSSH configuration only.
+`hostdb check` prints separate tables for the database, installed tools, and user-level SSH configuration. It checks SQLite integrity, foreign keys, record formats, name collisions, group cycles, file permissions, and whether the generated SSH config is current and takes effect. Failed checks produce a nonzero exit status. Ansible tools are optional. Use `hostdb check --database-only` when you only need to check SQLite and its contents.
+
+For SSH checks, hostdb runs `ssh -G` on a safe copy of the user configuration without opening a connection. If it encounters a `Match` block or an unsupported `Include` path expansion, it reports the limitation and checks the generated blocks individually.
 
 ## Tests and performance
 
