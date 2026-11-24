@@ -18,7 +18,9 @@ func seed(b *testing.B, n int) (context.Context, *store.Store, string) {
 	b.Helper()
 	ctx := context.Background()
 	path := filepath.Join(b.TempDir(), "bench.db")
-	s, err := store.Open(ctx, path, store.Initialize)
+	_, err := store.Init(ctx, path)
+	need(b, err)
+	s, err := store.Open(ctx, path, store.Write)
 	need(b, err)
 	err = s.Transaction(ctx, func(q store.Queries) error {
 		for _, group := range []string{"web", "web_nodes"} {

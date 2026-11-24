@@ -36,8 +36,13 @@ func New() *cobra.Command {
 	a.inventoryFlags(inv, false)
 
 	root.AddCommand(
-		command("init", "Initialize or migrate the database", cobra.NoArgs, func(cmd *cobra.Command, args []string) error {
-			return a.withDB(cmd.Context(), store.Initialize, func(*store.Store) error { return nil })
+		command("init", "Initialize a new database", cobra.NoArgs, a.init),
+		command("upgrade", "Upgrade the schema of an initialized database", cobra.NoArgs, func(cmd *cobra.Command, args []string) error {
+			path, err := store.Path(a.dbPath)
+			if err != nil {
+				return err
+			}
+			return store.Upgrade(cmd.Context(), path)
 		}),
 		a.hostCommands(), a.groupCommands(), a.sshCommands(), inv, a.importCommands(), a.completionCommands(root),
 		command("validate", "Check consistency and data in SQLite", cobra.NoArgs, func(cmd *cobra.Command, args []string) error {
@@ -52,12 +57,32 @@ func New() *cobra.Command {
 		}),
 		command("doctor", "Check SQLite, OpenSSH configuration and Ansible availability", cobra.NoArgs, a.doctor),
 		command("backup PATH", "Create a consistent SQLite backup", cobra.ExactArgs(1), func(cmd *cobra.Command, args []string) error {
-			return a.withDB(cmd.Context(), store.ReadOnly, func(s *store.Store) error {
-				return s.Backup(cmd.Context(), args[0])
-			})
+			path, err := store.Path(a.dbPath)
+			if err != nil {
+				return err
+			}
+			return store.Backup(cmd.Context(), path, args[0])
 		}),
 	)
 	return root
+}
+
+func (a *app) init(cmd *cobra.Command, args []string) error {
+	path, err := store.Path(a.dbPath)
+	if err != nil {
+		return err
+	}
+	result, err := store.Init(cmd.Context(), path)
+	if err != nil {
+		return err
+	}
+	switch result {
+	case store.AlreadyInitialized:
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), "Database is already initialized.")
+	case store.UpgradeRequired:
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), "Database is already initialized with an older schema. Run hostdb upgrade.")
+	}
+	return err
 }
 
 func (a *app) withDB(ctx context.Context, mode store.Mode, fn func(*store.Store) error) error {

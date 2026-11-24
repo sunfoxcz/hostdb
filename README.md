@@ -25,7 +25,6 @@ sha256sum --check --ignore-missing SHA256SUMS
 tar -xzf "$archive" hostdb
 install -Dm755 hostdb "$HOME/.local/bin/hostdb"
 export PATH="$HOME/.local/bin:$PATH"
-hostdb init
 ```
 
 Use `gh attestation verify "$archive" --repo sunfoxcz/hostdb` to verify the archive's build provenance on GitHub. [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
@@ -44,7 +43,6 @@ go version
 make build
 make install
 export PATH="$HOME/.local/bin:$PATH"
-hostdb init
 ```
 
 Add the `PATH` export to `~/.zshrc` to keep it across sessions. The default installation path is `~/.local/bin/hostdb`. You can also build the binary directly with Go and install it yourself.
@@ -54,6 +52,10 @@ CGO_ENABLED=0 go build -trimpath -o hostdb ./cmd/hostdb
 install -Dm755 hostdb "$HOME/.local/bin/hostdb"
 ```
 
+### Initialize a database
+
+Run `hostdb init` once when setting up a new database.
+
 The binary embeds SQLite via `modernc.org/sqlite`. The `sqlite3` command is optional. The default database path is `~/.local/share/hostdb/hosts.db`, or `$XDG_DATA_HOME/hostdb/hosts.db` when `XDG_DATA_HOME` is an absolute path. `HOSTDB_DB` overrides the default, and `--db` overrides both.
 
 ```sh
@@ -62,7 +64,17 @@ hostdb init
 hostdb --db /srv/private/hosts.db init
 ```
 
-`init` is safe to rerun. Write commands apply schema migrations automatically. After upgrading the binary, run `hostdb init` before your first read. Inventory commands open the database in read-only mode. SQLite may use `-wal` and `-shm` files in the same directory when WAL mode is active.
+For an initialized database, `hostdb init` reports its state and suggests `hostdb upgrade` when the schema is older.
+
+After replacing the binary, the first read or write that needs a schema migration applies it automatically. Inventory queries use a read-only connection once the schema is current. Backups preserve the source schema, and import dry runs apply any migrations to the temporary copy.
+
+To migrate ahead of time, for example before running Ansible with read-only access, run `hostdb upgrade` with write access to the database. If the selected database file is missing, the command reports an error and suggests `hostdb init`. It succeeds without changes for an empty file or an up-to-date database.
+
+```sh
+hostdb --db /srv/private/hosts.db upgrade
+```
+
+SQLite may use `-wal` and `-shm` files in the same directory when WAL mode is active.
 
 ## Hosts, aliases, and SSH settings
 
@@ -274,7 +286,6 @@ The backup command uses `VACUUM INTO` to take a consistent SQLite snapshot, incl
 install -Dm600 "$HOME/backups/hostdb/hosts-2026-11-22.db" \
     "$HOME/.local/share/hostdb/restored.db"
 export HOSTDB_DB="$HOME/.local/share/hostdb/restored.db"
-hostdb init
 hostdb validate
 hostdb inventory --list
 hostdb ssh sync
@@ -286,11 +297,12 @@ The backup includes the saved automatic sync path. If you run the restored datab
 
 | Symptom | What to check |
 |---|---|
-| The database is missing or has an older schema | Check `HOSTDB_DB` or `--db` and run `hostdb init`. The database should have permissions `0600` and reside in a private directory. |
+| The database is missing | Check `HOSTDB_DB` or `--db` and run `hostdb init` to create it. The database should have permissions `0600` and reside in a private directory. |
+| An automatic schema upgrade fails because the database is read-only | Run `hostdb upgrade` with write access to the selected database, then retry the command. |
 | `ssh -G` reports a different user, address, or port | Check the `Include` placement and block order described in [OpenSSH](#openssh), then run `hostdb doctor`. |
 | OpenSSH rejects an algorithm or directive | `hostdb doctor` reports the host name and the OpenSSH error. Availability depends on the installed client and its cryptographic libraries. |
 | Ansible falls back to implicit localhost | Verify that the wrapper is executable, `hostdb` is on `PATH`, and `ansible-inventory -i ./inventory-hostdb --graph` uses the intended database. |
-| Ansible warns about a host and group with the same name | Run `hostdb init` to upgrade the database, then run `hostdb validate` to find existing collisions. Use `hostdb host rename OLD NEW` to resolve a canonical name collision and update the matching `host_vars` and playbook references. Use `hostdb host alias remove HOST ALIAS` to resolve an alias collision. |
+| Ansible warns about a host and group with the same name | Run `hostdb validate` to find existing collisions. Use `hostdb host rename OLD NEW` to resolve a canonical name collision and update the matching `host_vars` and playbook references. Use `hostdb host alias remove HOST ALIAS` to resolve an alias collision. |
 | Inventory variables are missing | Check the variable files alongside the inventory source, verify that names match exactly, and inspect `ansible-inventory --host NAME`. |
 | Ansible targets the wrong host | Check `ansible-inventory --host NAME` and the connection plugin settings. `ansible NAME -m ping -vvvv` opens a connection and prints the details. |
 

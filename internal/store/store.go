@@ -10,21 +10,33 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 //go:embed migrations/*.sql
 var migrations embed.FS
+
+var migrationFiles, migrationFilesErr = migrations.ReadDir("migrations")
 
 const applicationID = 0x48444231
 
 type Mode int
 
 const (
+	// ReadOnly returns a read-only connection after any pending migrations.
 	ReadOnly Mode = iota
 	Write
-	Initialize
+)
+
+type InitResult int
+
+const (
+	Initialized InitResult = iota
+	AlreadyInitialized
+	UpgradeRequired
 )
 
 type runner interface {
@@ -61,23 +73,140 @@ func Path(explicit string) (string, error) {
 }
 
 func Open(ctx context.Context, path string, mode Mode) (*Store, error) {
-	if mode == Initialize {
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	s, version, err := openInitialized(ctx, path, mode)
+	if err != nil {
+		return nil, err
+	}
+	if mode == ReadOnly {
+		if version == len(migrationFiles) {
+			return s, nil
+		}
+		s.Close()
+		if err := upgrade(ctx, path); err != nil {
+			return nil, fmt.Errorf("automatically upgrade database %q: %w", path, err)
+		}
+		s, version, err = openInitialized(ctx, path, ReadOnly)
+		if err != nil {
 			return nil, err
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		switch {
-		case err == nil:
-			if err := f.Close(); err != nil {
-				return nil, err
+		if version != len(migrationFiles) {
+			s.Close()
+			return nil, fmt.Errorf("database %q still needs a schema upgrade", path)
+		}
+		return s, nil
+	}
+
+	if err = s.enableWAL(ctx); err == nil && version < len(migrationFiles) {
+		_, err = s.migrate(ctx, false)
+	}
+	if err != nil {
+		s.Close()
+		return nil, fmt.Errorf("open database %q: %w", path, err)
+	}
+	return s, nil
+}
+
+// Init creates a fresh schema in an empty database.
+func Init(ctx context.Context, path string) (InitResult, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return Initialized, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	switch {
+	case err == nil:
+		if err := f.Close(); err != nil {
+			return Initialized, err
+		}
+	case !errors.Is(err, os.ErrExist):
+		return Initialized, err
+	}
+
+	s, version, err := openSchema(ctx, path, ReadOnly)
+	if err != nil {
+		return Initialized, err
+	}
+	s.Close()
+	if version == 0 {
+		s, version, err = openSchema(ctx, path, Write)
+		if err != nil {
+			return Initialized, err
+		}
+		defer s.Close()
+		if version == 0 {
+			if err := s.enableWAL(ctx); err != nil {
+				return Initialized, fmt.Errorf("initialize database %q: %w", path, err)
 			}
-		case !errors.Is(err, os.ErrExist):
-			return nil, err
+			if version, err = s.migrate(ctx, true); err != nil {
+				return Initialized, fmt.Errorf("initialize database %q: %w", path, err)
+			}
 		}
 	}
+	switch {
+	case version == 0:
+		return Initialized, nil
+	case version < len(migrationFiles):
+		return UpgradeRequired, nil
+	default:
+		return AlreadyInitialized, nil
+	}
+}
+
+// Upgrade migrates an existing hostdb database if its schema is older.
+func Upgrade(ctx context.Context, path string) error {
+	s, version, err := openSchema(ctx, path, ReadOnly)
+	if err != nil {
+		return err
+	}
+	s.Close()
+	if version == 0 || version == len(migrationFiles) {
+		return nil
+	}
+	if err := upgrade(ctx, path); err != nil {
+		return fmt.Errorf("upgrade database %q: %w", path, err)
+	}
+	return nil
+}
+
+// The caller has already checked that the database needs an upgrade.
+func upgrade(ctx context.Context, path string) error {
+	s, err := openDB(path, Write)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	_, err = s.migrate(ctx, false)
+	return err
+}
+
+func openInitialized(ctx context.Context, path string, mode Mode) (*Store, int, error) {
+	s, version, err := openSchema(ctx, path, mode)
+	if err == nil && version == 0 {
+		s.Close()
+		return nil, 0, fmt.Errorf("database %q is not initialized. Run hostdb init", path)
+	}
+	return s, version, err
+}
+
+func openSchema(ctx context.Context, path string, mode Mode) (*Store, int, error) {
+	if migrationFilesErr != nil {
+		return nil, 0, migrationFilesErr
+	}
+	s, err := openDB(path, mode)
+	if err != nil {
+		return nil, 0, err
+	}
+	version, err := schemaVersion(ctx, s.db)
+	if err != nil {
+		s.Close()
+		return nil, 0, fmt.Errorf("open database %q: %w", path, err)
+	}
+	return s, version, nil
+}
+
+func openDB(path string, mode Mode) (*Store, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("database %q does not exist; run hostdb init", path)
+		return nil, fmt.Errorf("database %q does not exist. Run hostdb init", path)
 	}
 	if err != nil {
 		return nil, err
@@ -109,59 +238,53 @@ func Open(ctx context.Context, path string, mode Mode) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{Queries: Queries{db}, db: db}
-	if err := s.prepare(ctx, mode); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("open database %q: %w", path, err)
-	}
-	return s, nil
+	return &Store{Queries: Queries{db}, db: db}, nil
 }
 
-func (s *Store) prepare(ctx context.Context, mode Mode) error {
-	files, err := migrations.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	version, err := schemaVersion(ctx, s.db, len(files))
-	if err != nil {
-		return err
-	}
-	if mode == ReadOnly {
-		if version < len(files) {
-			return errors.New("schema upgrade required; run hostdb init")
+func (s *Store) enableWAL(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for {
+		var journal string
+		err := s.db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journal)
+		if err == nil {
+			if !strings.EqualFold(journal, "wal") {
+				return fmt.Errorf("could not enable WAL journal mode (got %s)", journal)
+			}
+			return nil
 		}
-		return nil
+		var sqliteErr *sqlite.Error
+		if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != sqlite3.SQLITE_BUSY {
+			return fmt.Errorf("enable WAL journal mode: %w", err)
+		}
+		// SQLite can report BUSY without waiting for busy_timeout when changing journal modes.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("enable WAL journal mode: %w", err)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
-	var journal string
-	if err := s.db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journal); err != nil {
-		return err
-	}
-	if !strings.EqualFold(journal, "wal") {
-		return fmt.Errorf("could not enable WAL journal mode (got %s)", journal)
-	}
-	if version == len(files) {
-		return nil
-	}
-	return s.Transaction(ctx, func(q Queries) error {
+}
+
+func (s *Store) migrate(ctx context.Context, initialize bool) (int, error) {
+	var previousVersion int
+	err := s.Transaction(ctx, func(q Queries) error {
 		// Another process may have migrated the database while we waited for the lock.
-		version, err := schemaVersion(ctx, q.db, len(files))
+		version, err := schemaVersion(ctx, q.db)
 		if err != nil {
 			return err
 		}
-		if version == 0 {
-			var tables int
-			err := q.db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").Scan(&tables)
-			if err != nil {
-				return err
-			}
-			if tables != 0 {
-				return errors.New("unrecognized SQLite database")
-			}
+		previousVersion = version
+		empty := version == 0
+		if initialize != empty {
+			return nil
+		}
+		if initialize {
 			if _, err := q.db.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id=%d", applicationID)); err != nil {
 				return err
 			}
 		}
-		for i, file := range files[version:] {
+		for i, file := range migrationFiles[version:] {
 			migration, err := migrations.ReadFile("migrations/" + file.Name())
 			if err != nil {
 				return err
@@ -175,19 +298,30 @@ func (s *Store) prepare(ctx context.Context, mode Mode) error {
 		}
 		return nil
 	})
+	return previousVersion, err
 }
 
-func schemaVersion(ctx context.Context, db runner, latest int) (int, error) {
+func schemaVersion(ctx context.Context, db runner) (int, error) {
 	var version, appID int
-	err := db.QueryRowContext(ctx, "SELECT user_version, application_id FROM pragma_user_version(), pragma_application_id()").Scan(&version, &appID)
+	var unmarkedTables bool
+	err := db.QueryRowContext(ctx, `
+		SELECT user_version, application_id,
+		       CASE WHEN user_version = 0 THEN EXISTS (
+		           SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'
+		       ) ELSE 0 END
+		FROM pragma_user_version(), pragma_application_id()
+	`).Scan(&version, &appID, &unmarkedTables)
 	if err != nil {
 		return 0, err
 	}
 	if (version != 0 || appID != 0) && appID != applicationID {
 		return 0, errors.New("SQLite file is not a hostdb database")
 	}
-	if version < 0 || version > latest {
-		return 0, fmt.Errorf("unsupported database schema %d (this hostdb supports through %d)", version, latest)
+	if version < 0 || version > len(migrationFiles) {
+		return 0, fmt.Errorf("unsupported database schema %d (this hostdb supports through %d)", version, len(migrationFiles))
+	}
+	if unmarkedTables {
+		return 0, errors.New("unrecognized SQLite database")
 	}
 	return version, nil
 }

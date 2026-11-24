@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 var buildBinary = sync.OnceValues(func() (string, error) {
@@ -107,6 +110,62 @@ func fixture(t *testing.T) (dir, db, cli string) {
 	t.Setenv("HOSTDB_DB", db)
 	t.Setenv("HOME", dir)
 	return dir, db, cli
+}
+
+func TestCLISchemaLifecycle(t *testing.T) {
+	dir, path, cli := fixture(t)
+	runCLI := func(args ...string) string { return mustRun(t, dir, cli, args...) }
+	absent := filepath.Join(dir, "absent", "hosts.db")
+	out, stderr, err := run(t, dir, cli, "--db", absent, "upgrade")
+	if err == nil || out != "" {
+		t.Fatalf("expected upgrade to fail for a missing database, got %q, %q, %v", out, stderr, err)
+	}
+	assertContains(t, stderr, absent, "does not exist", "Run hostdb init")
+	if _, err := os.Stat(filepath.Dir(absent)); !os.IsNotExist(err) {
+		t.Fatalf("upgrade should leave a missing database path alone: %v", err)
+	}
+	writeFile(t, path, "", 0600)
+	runCLI("upgrade")
+	if info, err := os.Stat(path); err != nil || info.Size() != 0 {
+		t.Fatalf("upgrade should leave an empty database alone: %v, %v", info, err)
+	}
+
+	legacy, err := os.ReadFile("../internal/store/migrations/001_inventory.sql")
+	need(t, err)
+	db, err := sql.Open("sqlite", path)
+	need(t, err)
+	t.Cleanup(func() { db.Close() })
+	_, err = db.Exec(string(legacy) + `PRAGMA application_id=0x48444231;
+		PRAGMA user_version=1;
+		INSERT INTO hosts(name, hostname) VALUES ('legacy-node', 'legacy-node.example.com');`)
+	need(t, err)
+	need(t, db.Close())
+
+	assertContains(t, runCLI("init"), "already initialized", "hostdb upgrade")
+	ini := filepath.Join(dir, "inventory.ini")
+	writeFile(t, ini, "[web]\nlegacy-node\n", 0600)
+	assertContains(t, runCLI("import", "ansible-ini", ini, "--dry-run"), "Dry run", "add group web")
+	backup := filepath.Join(dir, "backup.db")
+	runCLI("backup", backup)
+	assertContains(t, runCLI("--db", backup, "init"), "hostdb upgrade")
+	assertContains(t, runCLI("init"), "hostdb upgrade")
+
+	out, stderr, err = run(t, dir, cli, "--list")
+	need(t, err)
+	if !json.Valid([]byte(out)) || stderr != "" {
+		t.Fatalf("unexpected inventory output on automatic upgrade: %q, %q", out, stderr)
+	}
+	assertContains(t, out, "legacy-node")
+	if got := runCLI("init"); got != "Database is already initialized.\n" {
+		t.Fatalf("expected current schema after reading inventory, got %q", got)
+	}
+
+	runCLI("--db", backup, "upgrade")
+	runCLI("--db", backup, "upgrade")
+	if got := runCLI("--db", backup, "init"); got != "Database is already initialized.\n" {
+		t.Fatalf("expected current schema after explicit upgrade, got %q", got)
+	}
+	assertContains(t, runCLI("--db", backup, "host", "list", "--format", "names"), "legacy-node")
 }
 
 func TestCLIInventoryAndSSH(t *testing.T) {

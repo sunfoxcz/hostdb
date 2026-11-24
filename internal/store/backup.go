@@ -7,6 +7,16 @@ import (
 	"path/filepath"
 )
 
+// Backup takes a snapshot of the source at its current schema version.
+func Backup(ctx context.Context, source, target string) error {
+	s, _, err := openInitialized(ctx, source, ReadOnly)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	return s.Backup(ctx, target)
+}
+
 func (s *Store) Backup(ctx context.Context, target string) error {
 	if _, err := os.Lstat(target); err == nil {
 		return fmt.Errorf("backup destination %q already exists", target)

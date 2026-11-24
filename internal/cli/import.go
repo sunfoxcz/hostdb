@@ -120,13 +120,15 @@ func (a *app) dryRun(ctx context.Context, apply func(store.Queries) error) error
 		return err
 	}
 	if _, err := os.Lstat(path); err == nil {
-		if err := a.withDB(ctx, store.ReadOnly, func(s *store.Store) error { return s.Backup(ctx, snapshot) }); err != nil {
+		if err := store.Backup(ctx, path, snapshot); err != nil {
 			return err
 		}
 	} else if !os.IsNotExist(err) {
 		return err
+	} else if _, err := store.Init(ctx, snapshot); err != nil {
+		return err
 	}
-	s, err := store.Open(ctx, snapshot, store.Initialize)
+	s, err := store.Open(ctx, snapshot, store.Write)
 	if err != nil {
 		return err
 	}

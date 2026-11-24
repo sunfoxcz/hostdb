@@ -16,7 +16,9 @@ func testStore(t testing.TB) (*Store, string, context.Context) {
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "nested", "hosts?#.db")
-	s, err := Open(ctx, path, Initialize)
+	_, err := Init(ctx, path)
+	check(t, err)
+	s, err := Open(ctx, path, Write)
 	check(t, err)
 	t.Cleanup(func() { s.Close() })
 	return s, path, ctx
@@ -164,11 +166,13 @@ func TestMigrationAndBackup(t *testing.T) {
 	check(t, legacy.AddGroup(ctx, "before", ""))
 	check(t, legacy.AddGroup(ctx, "before-alias", ""))
 	check(t, db.Close())
-	if reader, err := Open(ctx, path, ReadOnly); err == nil {
-		reader.Close()
-		t.Fatal("read-only opening accepted an old schema")
+	status, err := Init(ctx, path)
+	check(t, err)
+	if status != UpgradeRequired {
+		t.Fatalf("init returned %v for an older schema", status)
 	}
-	migrated, err := Open(ctx, path, Initialize)
+	check(t, Upgrade(ctx, path))
+	migrated, err := Open(ctx, path, Write)
 	check(t, err)
 	defer migrated.Close()
 	h, err := migrated.Host(ctx, "before")
